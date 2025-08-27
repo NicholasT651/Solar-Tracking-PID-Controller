@@ -81,7 +81,8 @@ void loop() {
 
   int R1 = analogRead(LDR1);
   int R2 = analogRead(LDR2);
-  double error = R1 - R2;
+  double error = R1 - (R2+2);
+
 
   // PID
   double outPID = pid(error);
