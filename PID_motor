@@ -1,0 +1,98 @@
+/* ==================== TB6612FNG (Pololu #713) WIRING =======================
+   MOTOR POWER:
+     VM   -> Motor supply (e.g., 6–12 V battery)   [NOT from Arduino 5V]
+     GND  -> Power ground; MUST be common with Arduino GND
+     VCC  -> Arduino 5V (or 3.3V logic)
+
+   CHANNEL A (we use this one):
+     AO1, AO2 -> The two motor leads (swap if direction is reversed)
+     PWMA      -> Arduino pin 6  (pwmPin)
+     AIN1      -> Arduino pin 7  (dir1Pin)
+     AIN2      -> Arduino pin 8  (dir2Pin)
+     STBY      -> Arduino pin 9  (stbyPin) — pull HIGH to enable driver
+
+   UNUSED:
+     Channel B pins (BIN1, BIN2, PWMB, BO1, BO2) can be left unconnected.
+   ======================================================================== */
+
+double dt, last_time;
+double intergral, previous, output = 0;   // keeping your original names
+double kp, ki, kd;
+
+// LDR inputs
+int LDR1 = A0;  // photoresistor 1
+int LDR2 = A1;  // photoresistor 2
+
+// TB6612FNG control pins (Channel A)
+int dir1Pin = 7;   // AIN1  -> TB6612FNG AIN1
+int dir2Pin = 8;   // AIN2  -> TB6612FNG AIN2
+int stbyPin = 9;   // STBY  -> TB6612FNG STBY (must be HIGH to run)
+int pwmPin  = 6;   // PWMA  -> TB6612FNG PWMA (must be PWM-capable)
+
+void setup() {
+  pinMode(LDR1, INPUT);
+  pinMode(LDR2, INPUT);
+
+  pinMode(dir1Pin, OUTPUT);
+  pinMode(dir2Pin, OUTPUT);
+  pinMode(stbyPin, OUTPUT);
+  pinMode(pwmPin,  OUTPUT);
+
+  // Enable the motor driver
+  digitalWrite(stbyPin, HIGH);
+
+  kp = 0.6;
+  ki = 0.0;
+  kd = 0.0;
+  last_time = 0;
+
+  Serial.begin(9600);
+
+  // Optional startup print
+  Serial.print(",");
+  Serial.println(0);
+  delay(100);
+}
+
+void loop() {
+  double now = millis();
+  dt = max((now - last_time) / 1000.0, 0.001);
+  last_time = now;
+
+  int R1 = analogRead(LDR1);
+  int R2 = analogRead(LDR2);
+  double error = R1 - R2;  // signed difference
+
+  double cmd = pid(error); // PID output (can be + or -)
+
+  // -------- TB6612FNG direction control (AIN1 / AIN2) --------
+  if (cmd >= 0) {
+    digitalWrite(dir1Pin, HIGH); // AIN1=1
+    digitalWrite(dir2Pin, LOW);  // AIN2=0  -> forward
+  } else {
+    digitalWrite(dir1Pin, LOW);  // AIN1=0
+    digitalWrite(dir2Pin, HIGH); // AIN2=1  -> reverse
+  }
+
+  // Speed (0..255). abs() because direction handled above.
+  analogWrite(pwmPin, constrain((int)abs(cmd), 0, 255));
+
+  // optional: to brake when nearly centered, set both HIGH briefly
+  // if (abs(error) < 2) { digitalWrite(dir1Pin, HIGH); digitalWrite(dir2Pin, HIGH); }
+
+  Serial.println(error);
+  delay(10);
+}
+
+double pid(double error) {
+  double proportional = error;
+  intergral += error * dt;
+  double derivative = (error - previous) / dt;
+  previous = error;
+
+  double out = (kp * proportional) + (ki * intergral) + (kd * derivative);
+
+  // Clip to PWM range for safety (driver expects 0..255 after abs())
+  out = constrain(out, -255, 255);
+  return out;
+}
