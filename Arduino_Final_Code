@@ -10,7 +10,7 @@
 
    CHANNEL A (we use this one):
      AO1, AO2 -> The two motor leads (swap if direction is reversed)
-     PWMA     -> Arduino pin 6  (pwmPin) D pin 
+     PWMA     -> Arduino pin 6  (pwmPin) D pin
      AIN1     -> Arduino pin 7  (dir1Pin)
      AIN2     -> Arduino pin 8  (dir2Pin)
      STBY     -> Arduino pin 9  (stbyPin) — pull HIGH to enable driver
@@ -34,7 +34,9 @@
      SCK      -> D13
 
    LOG FILE (on SD):
-     log.csv with columns:
+     On each power-up, creates a new file:
+       LOG001.CSV, LOG002.CSV, ...
+     Columns:
        millis,angle_deg,error,duty
    ================================================================ */
 
@@ -61,7 +63,7 @@ const int pwmPin  = 6;   // PWMA  -> TB6612FNG PWMA (must be PWM-capable)
 // ---------------- SD + ENCODER ----------------
 const int SD_CS_PIN = 10;
 File logFile;
-const char* LOGNAME = "log.csv";
+char logName[13];          // e.g., "LOG001.CSV" (8.3 filename)
 
 Adafruit_AS5600 as5600;
 float angle_deg = 0.0f;
@@ -110,19 +112,31 @@ void setup() {
   } else {
     Serial.println("SD init SUCCESS!");
 
-    // If file does not exist, create it and add header
-    if (!SD.exists(LOGNAME)) {
-      Serial.println("Creating log.csv and writing header...");
-      File f = SD.open(LOGNAME, FILE_WRITE);
+    // ---- Choose a new unique log file name: LOG001.CSV ... LOG999.CSV ----
+    bool foundName = false;
+    for (int i = 1; i <= 999; i++) {
+      snprintf(logName, sizeof(logName), "LOG%03d.CSV", i);
+      if (!SD.exists(logName)) {
+        foundName = true;
+        break;
+      }
+    }
+
+    if (!foundName) {
+      Serial.println("No free log file names (LOG001.CSV..LOG999.CSV used).");
+    } else {
+      Serial.print("Using log file: ");
+      Serial.println(logName);
+
+      // Create the file and write header
+      File f = SD.open(logName, FILE_WRITE);
       if (f) {
         f.println("millis,angle_deg,error,duty");
         f.close();
         Serial.println("Header written.");
       } else {
-        Serial.println("Could not create log.csv");
+        Serial.println("Could not create log file.");
       }
-    } else {
-      Serial.println("log.csv already exists, will append.");
     }
   }
 
@@ -177,19 +191,22 @@ void loop() {
   if (now_ms - last_log_ms >= LOG_PERIOD_MS) {
     last_log_ms = now_ms;
 
-    File lf = SD.open(LOGNAME, FILE_WRITE);
-    if (lf) {
-      lf.print(now_ms);
-      lf.print(",");
-      lf.print(angle_deg, 3);
-      lf.print(",");
-      lf.print(error, 3);
-      lf.print(",");
-      lf.println(duty);
-      lf.close();  // ensure file is visible on PC
-      Serial.println("Logged to SD.");
-    } else {
-      Serial.println("Failed to open log.csv for writing.");
+    // Only try logging if we have a valid logName (first char not zero)
+    if (logName[0] != '\0') {
+      File lf = SD.open(logName, FILE_WRITE);
+      if (lf) {
+        lf.print(now_ms);
+        lf.print(",");
+        lf.print(angle_deg, 3);
+        lf.print(",");
+        lf.print(error, 3);
+        lf.print(",");
+        lf.println(duty);
+        lf.close();  // ensure file is visible on PC
+        Serial.println("Logged to SD.");
+      } else {
+        Serial.println("Failed to open log file for writing.");
+      }
     }
   }
 
