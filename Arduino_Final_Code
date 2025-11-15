@@ -1,0 +1,210 @@
+/* ================================================================
+   ARDUINO NANO — LDR PID + TB6612FNG + AS5600 + SD LOGGING
+
+   TB6612FNG (Pololu #713) WIRING
+   ------------------------------
+   MOTOR POWER:
+     VM    -> Motor supply (e.g., 6–12 V battery)   [NOT from Arduino 5V]
+     GND   -> Power ground; MUST be common with Arduino GND
+     VCC   -> Arduino 5V (logic)
+
+   CHANNEL A (we use this one):
+     AO1, AO2 -> The two motor leads (swap if direction is reversed)
+     PWMA     -> Arduino pin 6  (pwmPin) D pin 
+     AIN1     -> Arduino pin 7  (dir1Pin)
+     AIN2     -> Arduino pin 8  (dir2Pin)
+     STBY     -> Arduino pin 9  (stbyPin) — pull HIGH to enable driver
+
+   LDRs:
+     LDR1     -> A0
+     LDR2     -> A1
+
+   AS5600 ENCODER (I2C):
+     VCC      -> 5V
+     GND      -> GND
+     SDA      -> A4
+     SCL      -> A5
+
+   SD MODULE (SPI):
+     VCC      -> 5V
+     GND      -> GND
+     CS       -> D10
+     MOSI     -> D11
+     MISO     -> D12
+     SCK      -> D13
+
+   LOG FILE (on SD):
+     log.csv with columns:
+       millis,angle_deg,error,duty
+   ================================================================ */
+
+#include <Wire.h>
+#include <SPI.h>
+#include <SD.h>
+#include <Adafruit_AS5600.h>
+
+// ---------------- PID + LDR + MOTOR ----------------
+double dt, last_time;
+double intergral, previous, output = 0;   // keeping your original names
+double kp, ki, kd;
+
+// LDR inputs
+const int LDR1 = A0;  // photoresistor 1
+const int LDR2 = A1;  // photoresistor 2
+
+// TB6612FNG control pins (Channel A)
+const int dir1Pin = 7;   // AIN1  -> TB6612FNG AIN1
+const int dir2Pin = 8;   // AIN2  -> TB6612FNG AIN2
+const int stbyPin = 9;   // STBY  -> TB6612FNG STBY (must be HIGH to run)
+const int pwmPin  = 6;   // PWMA  -> TB6612FNG PWMA (must be PWM-capable)
+
+// ---------------- SD + ENCODER ----------------
+const int SD_CS_PIN = 10;
+File logFile;
+const char* LOGNAME = "log.csv";
+
+Adafruit_AS5600 as5600;
+float angle_deg = 0.0f;
+
+// logging throttle
+unsigned long last_log_ms    = 0;
+const unsigned long LOG_PERIOD_MS = 1000;  // log once per second
+
+void setup() {
+  // LDRs
+  pinMode(LDR1, INPUT);
+  pinMode(LDR2, INPUT);
+
+  // Motor driver pins
+  pinMode(dir1Pin, OUTPUT);
+  pinMode(dir2Pin, OUTPUT);
+  pinMode(stbyPin, OUTPUT);
+  pinMode(pwmPin,  OUTPUT);
+
+  // Enable the motor driver
+  digitalWrite(stbyPin, HIGH);
+
+  // PID gains
+  kp = 0.6;
+  ki = 0.0;
+  kd = 0.0;
+  last_time = 0;
+
+  Serial.begin(9600);
+  while (!Serial) {}
+
+  // ---- AS5600 init ----
+  Serial.println("Initializing I2C and AS5600...");
+  Wire.begin();
+  if (!as5600.begin()) {
+    Serial.println("AS5600 NOT detected! Check wiring.");
+  } else {
+    Serial.println("AS5600 connected.");
+  }
+
+  // ---- SD init ----
+  Serial.println("Initializing SD card...");
+  if (!SD.begin(SD_CS_PIN)) {
+    Serial.println("SD init FAILED!");
+    // you can return here, but PID will still run without logging
+  } else {
+    Serial.println("SD init SUCCESS!");
+
+    // If file does not exist, create it and add header
+    if (!SD.exists(LOGNAME)) {
+      Serial.println("Creating log.csv and writing header...");
+      File f = SD.open(LOGNAME, FILE_WRITE);
+      if (f) {
+        f.println("millis,angle_deg,error,duty");
+        f.close();
+        Serial.println("Header written.");
+      } else {
+        Serial.println("Could not create log.csv");
+      }
+    } else {
+      Serial.println("log.csv already exists, will append.");
+    }
+  }
+
+  // Optional startup print from your original
+  Serial.print(",");
+  Serial.println(0);
+  delay(100);
+}
+
+void loop() {
+  // ---------- PID TIMING ----------
+  double now = millis();
+  dt = max((now - last_time) / 1000.0, 0.001);
+  last_time = now;
+
+  // ---------- SENSOR READS ----------
+  int R1 = analogRead(LDR1);
+  int R2 = analogRead(LDR2);
+  double error = (double)R1 - (double)R2;  // signed difference
+
+  // Read AS5600 (0..4095) and convert to 0..360 deg
+  uint16_t raw = as5600.getAngle();
+  angle_deg = raw * (360.0f / 4096.0f);
+
+  // ---------- PID COMPUTE ----------
+  double cmd = pid(error); // PID output (can be + or -)
+
+  // ---------- MOTOR CONTROL ----------
+  // Direction
+  if (cmd >= 0) {
+    digitalWrite(dir1Pin, HIGH); // AIN1=1
+    digitalWrite(dir2Pin, LOW);  // AIN2=0  -> forward
+  } else {
+    digitalWrite(dir1Pin, LOW);  // AIN1=0
+    digitalWrite(dir2Pin, HIGH); // AIN2=1  -> reverse
+  }
+
+  // Speed (0..255). abs() because direction handled above.
+  int duty = constrain((int)abs(cmd), 0, 255);
+  analogWrite(pwmPin, duty);
+
+  // ---------- SERIAL DEBUG ----------
+  Serial.print("err=");
+  Serial.print(error);
+  Serial.print(" duty=");
+  Serial.print(duty);
+  Serial.print(" angle=");
+  Serial.println(angle_deg, 2);
+
+  // ---------- SD LOGGING (throttled) ----------
+  unsigned long now_ms = millis();
+  if (now_ms - last_log_ms >= LOG_PERIOD_MS) {
+    last_log_ms = now_ms;
+
+    File lf = SD.open(LOGNAME, FILE_WRITE);
+    if (lf) {
+      lf.print(now_ms);
+      lf.print(",");
+      lf.print(angle_deg, 3);
+      lf.print(",");
+      lf.print(error, 3);
+      lf.print(",");
+      lf.println(duty);
+      lf.close();  // ensure file is visible on PC
+      Serial.println("Logged to SD.");
+    } else {
+      Serial.println("Failed to open log.csv for writing.");
+    }
+  }
+
+  delay(10);  // keep ~100 Hz control loop
+}
+
+double pid(double error) {
+  double proportional = error;
+  intergral += error * dt;
+  double derivative = (error - previous) / dt;
+  previous = error;
+
+  double out = (kp * proportional) + (ki * intergral) + (kd * derivative);
+
+  // Clip to PWM range for safety (driver expects 0..255 after abs())
+  out = constrain(out, -255.0, 255.0);
+  return out;
+}
